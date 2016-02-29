@@ -20,7 +20,7 @@ module Test.Hspec.Snap (
 
   -- * Core data types
   , TestResponse(..)
-  , SnapHspecM
+  , FnHspecM
 
   -- * Factory style test data generation
   , Factory(..)
@@ -74,7 +74,7 @@ module Test.Hspec.Snap (
 
 
   -- * Internal types and helpers
-  , SnapHspecState(..)
+  , FnHspecState(..)
   , setResult
   , runRequest
   , runHandlerSafe
@@ -99,14 +99,7 @@ import           Data.Maybe              (fromMaybe)
 import           Data.Text               (Text)
 import qualified Data.Text               as T
 import qualified Data.Text.Encoding      as T
-import           Snap.Core               (Response (..), getHeader)
-import qualified Snap.Core               as Snap
-import           Snap.Snaplet            (Handler, Snaplet, SnapletInit,
-                                          SnapletLens, with)
-import           Snap.Snaplet.Session    (SessionManager, commitSession,
-                                          sessionToList, setInSession)
-import           Snap.Snaplet.Test       (InitializerState, closeSnaplet,
-                                          evalHandler', getSnaplet, runHandler')
+import           Network.Wai             (Response (..), responseHeaderFromBS, Status (..))
 import           Snap.Test               (RequestBuilder, getResponseBody)
 import qualified Snap.Test               as Test
 import           Test.Hspec
@@ -133,7 +126,7 @@ data TestResponse = Html RespCode Text
 -- | The main monad that tests run inside of. This allows both access
 -- to the application (via requests and `eval`) and to running
 -- assertions (like `should404` or `shouldHaveText`).
-type SnapHspecM b = StateT (SnapHspecState b) IO
+type FnHspecM b = StateT (FnHspecState b) IO
 
 -- | Internal state used to share site initialization across tests, and to propogate failures.
 -- Understanding it is completely unnecessary to use the library.
@@ -147,20 +140,18 @@ type SnapHspecM b = StateT (SnapHspecState b) IO
 -- > Session state
 -- > Before handler (runs before each eval)
 -- > After handler (runs after each eval).
-data SnapHspecState b = SnapHspecState Result
-                                       (Handler b b ())
-                                       (Snaplet b)
-                                       (InitializerState b)
-                                       (MVar [(Text, Text)])
-                                       (Handler b b ())
-                                       (Handler b b ())
+data FnHspecState b = FnHspecState Result
+                                   (ctxt -> IO (Maybe Response))
+                                   ctxt
+                                   (ctxt -> IO (Maybe Response))
+                                   (ctxt -> IO (Maybe Response))
 
 
-instance Example (SnapHspecM b ()) where
-  type Arg (SnapHspecM b ()) = SnapHspecState b
+instance Example (FnHspecM b ()) where
+  type Arg (FnHspecM b ()) = FnHspecState b
   evaluateExample s _ cb _ =
     do mv <- newEmptyMVar
-       cb $ \st -> do ((),SnapHspecState r' _ _ _ _ _ _) <- runStateT s st
+       cb $ \st -> do ((),FnHspecState r' _ _ _ _ _ _) <- runStateT s st
                       putMVar mv r'
        takeMVar mv
 
@@ -178,118 +169,75 @@ instance Example (SnapHspecM b ()) where
 -- >   fields = FooFields randomIO
 -- >   save f = liftIO f >>= saveFoo . Foo1
 -- >
--- > main = do create id :: SnapHspecM App Foo
--- >           create (const $ FooFields (return 1)) :: SnapHspecM App Foo
+-- > main = do create id :: FnHspecM App Foo
+-- >           create (const $ FooFields (return 1)) :: FnHspecM App Foo
 class Factory b a d | a -> b, a -> d, d -> a where
   fields :: d
-  save :: d -> SnapHspecM b a
-  create :: (d -> d) -> SnapHspecM b a
+  save :: d -> FnHspecM b a
+  create :: (d -> d) -> FnHspecM b a
   create transform = save $ transform fields
-  reload :: a -> SnapHspecM b a
+  reload :: a -> FnHspecM b a
   reload = return
 
 
--- | The way to run a block of `SnapHspecM` tests within an `hspec`
+-- | The way to run a block of `FnHspecM` tests within an `hspec`
 -- test suite. This takes both the top level handler (usually `route
 -- routes`, where `routes` are all the routes for your site) and the
 -- site initializer (often named `app`), and a block of tests. A test
 -- suite can have multiple calls to `snap`, though each one will cause
 -- the site initializer to run, which is often a slow operation (and
 -- will slow down test suites).
-snap :: Handler b b () -> SnapletInit b b -> SpecWith (SnapHspecState b) -> Spec
-snap site app spec = do
-  snapinit <- runIO $ getSnaplet (Just "test") app
-  mv <- runIO (newMVar [])
-  case snapinit of
+fn :: (ctxt -> IO (Maybe Response)) -> IO ctxt -> (IO ctxt -> IO ()) -> SpecWith (FnHspecState b) -> Spec
+fn site initializer shutdown spec = do
+  eitherErrCtxt <- runIO initializer
+  case eitherErrCtxt of
     Left err -> error $ show err
-    Right (snaplet, initstate) ->
-      afterAll (const $ closeSnaplet initstate) $
-        before (return (SnapHspecState Success site snaplet initstate mv (return ()) (return ()))) spec
+    Right initCtxt ->
+      afterAll (const $ shutdown initCtxt) $
+        before (return (FnHspecState Success site snap initCtxt  m (return ()) (return ()))) spec
 
 -- | This allows you to change the default handler you are running
 -- requests against within a block. This is most likely useful for
 -- setting request state (for example, logging a user in).
-modifySite :: (Handler b b () -> Handler b b ())
-           -> SpecWith (SnapHspecState b)
-           -> SpecWith (SnapHspecState b)
-modifySite f = beforeWith (\(SnapHspecState r site snaplet initst sess bef aft) ->
-                             return (SnapHspecState r (f site) snaplet initst sess bef aft))
+modifySite :: (ctxt -> IO (Maybe Response) -> ctxt -> IO (Maybe Response))
+           -> SpecWith (FnHspecState b)
+           -> SpecWith (FnHspecState b)
+modifySite f = beforeWith (\(FnHspecState r site initst bef aft) ->
+                             return (FnHspecState r (f site) initst bef aft))
 
 -- | This performs a similar operation to `modifySite` but in the context
--- of `SnapHspecM` (which is needed if you need to `eval`, produce values, and
+-- of `FnHspecM` (which is needed if you need to `eval`, produce values, and
 -- hand them somewhere else (so they can't be created within `f`).
-modifySite' :: (Handler b b () -> Handler b b ())
-            -> SnapHspecM b a
-            -> SnapHspecM b a
-modifySite' f a = do (SnapHspecState r site s i sess bef aft) <- S.get
-                     S.put (SnapHspecState r (f site) s i sess bef aft)
+modifySite' :: (ctxt -> IO (Maybe Response) -> ctxt -> IO (Maybe Response))
+            -> FnHspecM b a
+            -> FnHspecM b a
+modifySite' f a = do (FnHspecState r site i bef aft) <- S.get
+                     S.put (FnHspecState r (f site) i bef aft)
                      a
 
 -- | Evaluate a Handler action after each test.
-afterEval :: Handler b b () -> SpecWith (SnapHspecState b) -> SpecWith (SnapHspecState b)
-afterEval h = after (\(SnapHspecState _r _site s i _ _ _) ->
-                       do res <- evalHandlerSafe h s i
+afterEval :: ctxt -> IO (Maybe Response) -> SpecWith (FnHspecState b) -> SpecWith (FnHspecState b)
+afterEval h = after (\(FnHspecState _r site i _ _) ->
+                       do res <- evalHandlerSafe site i
                           case res of
                             Right _ -> return ()
                             Left msg -> liftIO $ print msg)
 
 -- | Evaluate a Handler action before each test.
-beforeEval :: Handler b b () -> SpecWith (SnapHspecState b) -> SpecWith (SnapHspecState b)
-beforeEval h = beforeWith (\state@(SnapHspecState _r _site s i _ _ _) -> do void $ evalHandlerSafe h s i
+beforeEval :: ctxt -> IO (Maybe Response) -> SpecWith (FnHspecState b) -> SpecWith (FnHspecState b)
+beforeEval h = beforeWith (\state@(FnHspecState _r site i _ _) -> do void $ evalHandlerSafe s i
                                                                             return state)
 
-class HasSession b where
-  getSessionLens :: SnapletLens b SessionManager
-
-recordSession :: HasSession b => SnapHspecM b a -> SnapHspecM b a
-recordSession a =
-  do (SnapHspecState r site s i mv bef aft) <- S.get
-     S.put (SnapHspecState r site s i mv
-                             (do ps <- liftIO $ readMVar mv
-                                 with getSessionLens $ mapM_ (uncurry setInSession) ps
-                                 with getSessionLens commitSession)
-                             (do ps' <- with getSessionLens sessionToList
-                                 void . liftIO $ takeMVar mv
-                                 liftIO $ putMVar mv ps'))
-     res <- a
-     (SnapHspecState r' _ _ _ _ _ _) <- S.get
-     void . liftIO $ takeMVar mv
-     liftIO $ putMVar mv []
-     S.put (SnapHspecState r' site s i mv bef aft)
-     return res
-
-sessContents :: SnapHspecM b Text
-sessContents = do
-  (SnapHspecState _ _ _ _ mv _ _) <- S.get
-  ps <- liftIO $ readMVar mv
-  return $ T.concat (map (uncurry T.append) ps)
-
-sessionShouldContain :: Text -> SnapHspecM b ()
-sessionShouldContain t =
-  do contents <- sessContents
-     if t `T.isInfixOf` contents
-       then setResult Success
-       else setResult (Fail Nothing $ "Session did not contain: " ++ T.unpack t
-                                    ++ "\n\nSession was:\n" ++ T.unpack contents)
-
-sessionShouldNotContain :: Text -> SnapHspecM b ()
-sessionShouldNotContain t =
-  do contents <- sessContents
-     if t `T.isInfixOf` contents
-       then setResult (Fail Nothing $ "Session should not have contained: " ++ T.unpack t
-                                    ++ "\n\nSession was:\n" ++ T.unpack contents)
-       else setResult Success
-
 -- | Runs a DELETE request
-delete :: Text -> SnapHspecM b TestResponse
+delete :: Text -> FnHspecM b TestResponse
 delete path = runRequest (Test.delete (T.encodeUtf8 path) M.empty)
 
 -- | Runs a GET request.
-get :: Text -> SnapHspecM b TestResponse
+get :: Text -> FnHspecM b TestResponse
 get path = get' path M.empty
 
 -- | Runs a GET request, with a set of parameters.
-get' :: Text -> Snap.Params -> SnapHspecM b TestResponse
+get' :: Text -> Snap.Params -> FnHspecM b TestResponse
 get' path ps = runRequest (Test.get (T.encodeUtf8 path) ps)
 
 -- | A helper to construct parameters.
@@ -298,21 +246,21 @@ params :: [(ByteString, ByteString)] -- ^ Pairs of parameter and value.
 params = M.fromList . map (\x -> (fst x, [snd x]))
 
 -- | Creates a new POST request, with a set of parameters.
-post :: Text -> Snap.Params -> SnapHspecM b TestResponse
+post :: Text -> Snap.Params -> FnHspecM b TestResponse
 post path ps = runRequest (Test.postUrlEncoded (T.encodeUtf8 path) ps)
 
 -- | Creates a new POST request with a given JSON value as the request body.
-postJson :: ToJSON tj => Text -> tj -> SnapHspecM b TestResponse
+postJson :: ToJSON tj => Text -> tj -> FnHspecM b TestResponse
 postJson path json = runRequest $ Test.postRaw (T.encodeUtf8 path)
                                                "application/json"
                                                (toStrict $ encode json)
 
 -- | Creates a new PUT request, with a set of parameters, with a default type of "application/x-www-form-urlencoded"
-put :: Text -> Snap.Params -> SnapHspecM b TestResponse
+put :: Text -> Snap.Params -> FnHspecM b TestResponse
 put path params' = put' path "application/x-www-form-urlencoded" params'
 
 -- | Creates a new PUT request with a configurable MIME/type
-put' :: Text -> Text -> Snap.Params -> SnapHspecM b TestResponse
+put' :: Text -> Text -> Snap.Params -> FnHspecM b TestResponse
 put' path mime params' = runRequest $ do
   Test.put (T.encodeUtf8 path) (T.encodeUtf8 mime) ""
   Test.setQueryString params'
@@ -327,8 +275,8 @@ restrictResponse selector (Html code body) =
 restrictResponse _ r = r
 
 -- | Runs an arbitrary stateful action from your application.
-eval :: Handler b b a -> SnapHspecM b a
-eval act = do (SnapHspecState _ _site app is _mv bef aft) <- S.get
+eval :: Handler b b a -> FnHspecM b a
+eval act = do (FnHspecState _ _site app is _mv bef aft) <- S.get
               liftIO $ either (error . T.unpack) id <$> evalHandlerSafe (do bef
                                                                             r <- act
                                                                             aft
@@ -337,10 +285,10 @@ eval act = do (SnapHspecState _ _site app is _mv bef aft) <- S.get
 
 -- | Records a test Success or Fail. Only the first Fail will be
 -- recorded (and will cause the whole block to Fail).
-setResult :: Result -> SnapHspecM b ()
-setResult r = do (SnapHspecState r' s a i sess bef aft) <- S.get
+setResult :: Result -> FnHspecM b ()
+setResult r = do (FnHspecState r' s a i sess bef aft) <- S.get
                  case r' of
-                   Success -> S.put (SnapHspecState r s a i sess bef aft)
+                   Success -> S.put (FnHspecState r s a i sess bef aft)
                    _ -> return ()
 
 -- | Asserts that a given stateful action will produce a specific different result after
@@ -348,8 +296,8 @@ setResult r = do (SnapHspecState r' s a i sess bef aft) <- S.get
 shouldChange :: (Show a, Eq a)
              => (a -> a)
              -> Handler b b a
-             -> SnapHspecM b c
-             -> SnapHspecM b ()
+             -> FnHspecM b c
+             -> FnHspecM b ()
 shouldChange f v act = do before' <- eval v
                           void act
                           after' <- eval v
@@ -360,7 +308,7 @@ shouldChange f v act = do before' <- eval v
 shouldEqual :: (Show a, Eq a)
             => a
             -> a
-            -> SnapHspecM b ()
+            -> FnHspecM b ()
 shouldEqual a b = if a == b
                       then setResult Success
                       else setResult (Fail Nothing ("Should have held: " ++ show a ++ " == " ++ show b))
@@ -369,71 +317,71 @@ shouldEqual a b = if a == b
 shouldNotEqual :: (Show a, Eq a)
                => a
                -> a
-               -> SnapHspecM b ()
+               -> FnHspecM b ()
 shouldNotEqual a b = if a == b
                          then setResult (Fail Nothing ("Should not have held: " ++ show a ++ " == " ++ show b))
                          else setResult Success
 
 -- | Asserts that the value is True.
 shouldBeTrue :: Bool
-             -> SnapHspecM b ()
+             -> FnHspecM b ()
 shouldBeTrue True = setResult Success
 shouldBeTrue False = setResult (Fail Nothing "Value should have been True.")
 
 -- | Asserts that the value is not True (otherwise known as False).
 shouldNotBeTrue :: Bool
-                 -> SnapHspecM b ()
+                 -> FnHspecM b ()
 shouldNotBeTrue False = setResult Success
 shouldNotBeTrue True = setResult (Fail Nothing "Value should have been True.")
 
 -- | Asserts that the response is a success (either Html, or Other with status 200).
-should200 :: TestResponse -> SnapHspecM b ()
+should200 :: TestResponse -> FnHspecM b ()
 should200 (Html _ _)   = setResult Success
 should200 (Json 200 _) = setResult Success
 should200 (Other 200)  = setResult Success
 should200 r = setResult (Fail Nothing (show r))
 
 -- | Asserts that the response is not a normal 200.
-shouldNot200 :: TestResponse -> SnapHspecM b ()
+shouldNot200 :: TestResponse -> FnHspecM b ()
 shouldNot200 (Html _ _) = setResult (Fail Nothing "Got Html back.")
 shouldNot200 (Other 200) = setResult (Fail Nothing "Got Other with 200 back.")
 shouldNot200 _ = setResult Success
 
 -- | Asserts that the response is a NotFound.
-should404 :: TestResponse -> SnapHspecM b ()
+should404 :: TestResponse -> FnHspecM b ()
 should404 NotFound = setResult Success
 should404 r = setResult (Fail Nothing (show r))
 
 -- | Asserts that the response is not a NotFound.
-shouldNot404 :: TestResponse -> SnapHspecM b ()
+shouldNot404 :: TestResponse -> FnHspecM b ()
 shouldNot404 NotFound = setResult (Fail Nothing "Got NotFound back.")
 shouldNot404 _ = setResult Success
 
 -- | Asserts that the response is a redirect.
-should300 :: TestResponse -> SnapHspecM b ()
+should300 :: TestResponse -> FnHspecM b ()
 should300 (Redirect _ _) = setResult Success
 should300 r = setResult (Fail Nothing (show r))
 
 -- | Asserts that the response is not a redirect.
-shouldNot300 :: TestResponse -> SnapHspecM b ()
+shouldNot300 :: TestResponse -> FnHspecM b ()
 shouldNot300 (Redirect _ _) = setResult (Fail Nothing "Got Redirect back.")
 shouldNot300 _ = setResult Success
 
 -- | Asserts that the response is a redirect, and thet the url it
 -- redirects to starts with the given path.
-should300To :: Text -> TestResponse -> SnapHspecM b ()
+should300To :: Text -> TestResponse -> FnHspecM b ()
 should300To pth (Redirect _ to) | pth `T.isPrefixOf` to = setResult Success
 should300To _ r = setResult (Fail Nothing (show r))
 
 -- | Asserts that the response is not a redirect to a given path. Note
 -- that it can still be a redirect for this assertion to succeed, the
 -- path it redirects to just can't start with the given path.
-shouldNot300To :: Text -> TestResponse -> SnapHspecM b ()
+shouldNot300To :: Text -> TestResponse -> FnHspecM b ()
 shouldNot300To pth (Redirect _ to) | pth `T.isPrefixOf` to = setResult (Fail Nothing "Got Redirect back.")
 shouldNot300To _ _ = setResult Success
 
 -- | Assert that a response (which should be Html) has a given selector.
-shouldHaveSelector :: Text -> TestResponse -> SnapHspecM b ()
+shouldHaveSelector :: Text -> TestResponse -> FnHspecM b ()
 shouldHaveSelector selector r@(Html _ body) =
   setResult $ if haveSelector' selector r
                 then Success
@@ -442,7 +390,7 @@ shouldHaveSelector selector r@(Html _ body) =
 shouldHaveSelector match _ = setResult (Fail Nothing (T.unpack $ T.concat ["Non-HTML body should have contained css selector: ", match]))
 
 -- | Assert that a response (which should be Html) doesn't have a given selector.
-shouldNotHaveSelector :: Text -> TestResponse -> SnapHspecM b ()
+shouldNotHaveSelector :: Text -> TestResponse -> FnHspecM b ()
 shouldNotHaveSelector selector r@(Html _ body) =
   setResult $ if haveSelector' selector r
                 then Fail Nothing msg
@@ -458,7 +406,7 @@ haveSelector' selector (Html _ body) =
 haveSelector' _ _ = False
 
 -- | Asserts that the response (which should be Html) contains the given text.
-shouldHaveText :: Text -> TestResponse -> SnapHspecM b ()
+shouldHaveText :: Text -> TestResponse -> FnHspecM b ()
 shouldHaveText match (Html _ body) =
   if T.isInfixOf match body
   then setResult Success
@@ -466,7 +414,7 @@ shouldHaveText match (Html _ body) =
 shouldHaveText match _ = setResult (Fail Nothing (T.unpack $ T.concat ["Body contains: ", match]))
 
 -- | Asserts that the response (which should be Html) does not contain the given text.
-shouldNotHaveText :: Text -> TestResponse -> SnapHspecM b ()
+shouldNotHaveText :: Text -> TestResponse -> FnHspecM b ()
 shouldNotHaveText match (Html _ body) =
   if T.isInfixOf match body
   then setResult (Fail Nothing $ T.unpack $ T.concat [body, "' contains '", match, "'."])
@@ -485,7 +433,7 @@ form :: (Eq a, Show a)
                                      --   If failing, ErrorPaths should be all the errors that are triggered.
      -> DF.Form Text (Handler b b) a -- ^ The form to run
      -> M.Map Text Text                -- ^ The parameters to pass
-     -> SnapHspecM b ()
+     -> FnHspecM b ()
 form expected theForm theParams =
   do r <- eval $ DF.postForm "form" theForm (const $ return lookupParam)
      case expected of
@@ -519,52 +467,48 @@ form expected theForm theParams =
         fixedParams = M.mapKeys (T.append "form.") theParams
 
 -- | Runs a request (built with helpers from Snap.Test), resulting in a response.
-runRequest :: RequestBuilder IO () -> SnapHspecM b TestResponse
+runRequest :: Request -> FnHspecM b TestResponse
 runRequest req = do
-  (SnapHspecState _ site app is _ bef aft) <- S.get
-  res <- liftIO $ runHandlerSafe req (bef >> site >> aft) app is
+  (FnHspecState _ site is bef aft) <- S.get
+  res <- liftIO $ runHandlerSafe req (bef >> site >> aft) is
   case res of
     Left err ->
       error $ T.unpack err
-    Right response -> let respCode = respStatus response in
+    Right response -> let respCode = statusCode $ status response in
       case respCode of
         404 -> return NotFound
-        200 ->
-          liftIO $ parse200 response
-        _ -> if respCode >= 300 && respCode < 400
-                then do let url = fromMaybe "" $ getHeader "Location" response
+        200 -> liftIO $ parse200 response
+        _   -> if respCode >= 300 && respCode < 400
+                then do let headers = responseHeaders response
+                        let url = fromMaybe "" (lookup Location headers)
                         return (Redirect respCode (T.decodeUtf8 url))
                 else return (Other respCode)
-
-respStatus :: Response -> RespCode
-respStatus = RespCode . rspStatus
-
 
 parse200 :: Response -> IO TestResponse
 parse200 resp =
     let body        = getResponseBody resp
-        contentType = getHeader "content-type" resp in
+        headers     = responseHeaders resp
+        contentType = T.encodeUtf8 <$> lookup ContentType resp in
     case contentType of
       Just "application/json" -> Json 200 . fromStrict <$> body
       _                       -> Html 200 . T.decodeUtf8 <$> body
 
 -- | Runs a request against a given handler (often the whole site),
 -- with the given state. Returns any triggered exception, or the response.
-runHandlerSafe :: RequestBuilder IO ()
-               -> Handler b b v
-               -> Snaplet b
-               -> InitializerState b
+runHandlerSafe :: Request
+               -> (ctxt -> IO (Maybe Response))
+               -> ctxt
                -> IO (Either Text Response)
-runHandlerSafe req site s is =
-  catch (runHandler' s is req site) (\(e::SomeException) -> return $ Left (T.pack $ show e))
+runHandlerSafe req site ctxt =
+  catch (site $ setRequest ctxt req) (\(e::SomeException) ->
+    return $ Left (T.pack $ show e))
 
 -- | Evaluates a given handler with the given state. Returns any
 -- triggered exception, or the value produced.
-evalHandlerSafe :: Handler b b v
-                -> Snaplet b
-                -> InitializerState b
-                -> IO (Either Text v)
-evalHandlerSafe act s is =
-  catch (evalHandler' s is (Test.get "" M.empty) act) (\(e::SomeException) -> return $ Left (T.pack $ show e))
+evalHandlerSafe :: (ctxt -> IO (Maybe Response))
+                -> ctxt
+                -> IO (Either Text Response)
+evalHandlerSafe site ctxt =
+  catch (site ctxt) (\(e::SomeException) -> return $ Left (T.pack $ show e))
 
 {-# ANN put ("HLint: ignore Eta reduce"::String)                            #-}
