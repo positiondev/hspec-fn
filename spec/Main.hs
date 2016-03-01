@@ -11,63 +11,49 @@ module Main where
 ----------------------------------------------------------
 -- Section 0: Imports.                                  --
 ----------------------------------------------------------
-import           Control.Applicative                         ((<$>), (<*>))
-import           Control.Concurrent.MVar                     (MVar, isEmptyMVar,
-                                                              newEmptyMVar,
-                                                              newMVar, putMVar,
-                                                              takeMVar,
-                                                              tryPutMVar,
-                                                              tryTakeMVar)
-import           Control.Lens                         hiding ((.=))
-import           Control.Monad                               (void, when)
-import           Control.Monad.IO.Class                      (liftIO)
-import           Data.Aeson                                  (Value(..), (.=)
-                                                             ,object, decode
-                                                             ,ToJSON, FromJSON
-                                                             ,toJSON, parseJSON)
-import qualified Data.Aeson                                  as Ae ((.:))
-import           Data.ByteString                             (ByteString)
-import qualified Data.ByteString                             as BS (concat)
-import           Data.Map                                    (Map)
-import qualified Data.Map                                    as M
-import           Data.Maybe                                  (fromMaybe)
-import           Data.Text                                   (Text)
-import qualified Data.Text                                   as T
-import qualified Data.Text.Encoding                          as T
-import           Snap                                        (Handler,
-                                                              Method (..),
-                                                              Snaplet,
-                                                              SnapletInit,
-                                                              addRoutes,
-                                                              getParam,
-                                                              makeSnaplet,
-                                                              method,
-                                                              nestSnaplet,
-                                                              route, with,
-                                                              writeBS,
-                                                              writeText)
-import qualified Snap
-import           Snap.Snaplet.Session
-import           Snap.Snaplet.Session.Backends.CookieSession
-import           System.Directory                            (doesFileExist,
-                                                              removeFile)
+import           Control.Applicative       ((<$>), (<*>))
+import           Control.Concurrent.MVar   (MVar, isEmptyMVar, newEmptyMVar,
+                                            newMVar, putMVar, takeMVar,
+                                            tryPutMVar, tryTakeMVar)
+import           Control.Lens              hiding ((.=))
+import           Control.Monad             (void, when)
+import           Control.Monad.IO.Class    (liftIO)
+import           Data.Aeson                (FromJSON, ToJSON, Value (..),
+                                            decode, object, parseJSON, toJSON,
+                                            (.=))
+import qualified Data.Aeson                as Ae ((.:))
+import           Data.ByteString           (ByteString)
+import qualified Data.ByteString           as BS (concat)
+import           Data.Map                  (Map)
+import qualified Data.Map                  as M
+import           Data.Maybe                (fromMaybe)
+import           Data.Text                 (Text)
+import qualified Data.Text                 as T
+import qualified Data.Text.Encoding        as T
+import           Network.HTTP.Types.Method (StdMethod (..))
+import           Network.Wai               (Response, requestMethod)
+import           System.Directory          (doesFileExist, removeFile)
 import           Text.Digestive
+import           Web.Fn
 
 import           Test.Hspec
-import           Test.Hspec.Snap
+import           Test.Hspec.Fn
 
 ----------------------------------------------------------
 -- Section 1: Example application used for testing.     --
 ----------------------------------------------------------
 data Foo = Foo Int String String
-data Ctxt = Ctxt { _req :: FnRequest
-                 , _mv :: MVar ()
+data Ctxt = Ctxt { _req   :: FnRequest
+                 , _mv    :: MVar ()
                  , _store :: MVar (Map Int Foo) }
 
-makeLenses ''App
+makeLenses ''Ctxt
+
+instance RequestContext Ctxt where
+  requestLens = req
 
 newFoo :: Ctxt -> String -> String -> IO (Foo)
-newFoo ctxt s1 s2 = do smvar <- view store ctxt
+newFoo ctxt s1 s2 = do let smvar = view store ctxt
                        mp <- takeMVar smvar
                        let i = 1 + M.size mp
                        let foo = Foo i s1 s2
@@ -75,7 +61,7 @@ newFoo ctxt s1 s2 = do smvar <- view store ctxt
                        return foo
 
 lookupFoo :: Ctxt -> Int -> IO (Maybe Foo)
-lookupFoo ctxt i = do smvar <- view store ctxt
+lookupFoo ctxt i = do let smvar = view store ctxt
                       mp <- takeMVar smvar
                       putMVar smvar mp
                       return (M.lookup i mp)
@@ -104,34 +90,29 @@ exampleObj = ExampleObject 42 "foo"
 
 paramsAndMethodHandler :: Ctxt -> Text -> IO (Maybe Response)
 paramsAndMethodHandler ctxt q = do
-  let m = requestMethod (_req ctxt)
+  let m = requestMethod (fst $ _req ctxt)
   case m of
-    POST -> okText $ methodAndParam "POST "
-    PUT  -> okText $ methodAndParam "PUT "
+    "POST" -> okText $ methodAndParam "POST "
     _    -> okText "Not valid"
   where
     methodAndParam p = T.concat [p, q]
 
-routes :: [(ByteString, Handler App App ())]
-routes = [ method GET // path "test" ==> (\_ -> okText html)
-         , method POST // path "test" ==> (\_ -> okText "")
-         , path "test" // method DELETE ==> (\_ -> okText "deleted")
-         , path "test" // method PUT ==> (\_ -> okText "")
-         , path "params" // param "q" ==> writeParamsAndMethod mq
-         , path "redirect" ==> (\_ -> redirect "test")
-         , path "setmv" ==> (\ctxt -> do m <- view mv ctxt
-                                         void $ liftIO $ tryPutMVar m ()
-                                         return ())
+routes :: [Route Ctxt]
+routes = [ method GET // path "test"    ==> const (okText html)
+         , method POST // path "test"   ==> const (okText "")
+         , method DELETE // path "test" ==> const (okText "deleted")
+         , path "params" // param "q"   !=> paramsAndMethodHandler
+         , path "redirect"              ==> const (redirect "/test")
+         , path "setmv"                 ==> (\ctxt -> do let m = view mv ctxt
+                                                         void $ liftIO $ tryPutMVar m ()
+                                                         okText "")
          ]
 
-app :: MVar (Map Int Foo) -> MVar () -> SnapletInit App App
-app state mvar = makeSnaplet "app" "An snaplet example application." Nothing $ do
-   addRoutes routes
-   s <- nestSnaplet "sess" sess $ initCookieSessionManager "site_key.txt" "sess" (Just 3600)
-   Snap.onUnload (do e <- doesFileExist "site_key.txt"
-                     when e $ removeFile "site_key.txt")
-   return (App mvar state s)
+site :: Ctxt -> IO Response
+site ctxt = route ctxt routes `fallthrough` notFoundText "404"
 
+initializer :: MVar (Map Int Foo) -> MVar () -> IO Ctxt
+initializer state mvar = return (Ctxt defaultFnRequest mvar state)
 
 ----------------------------------------------------------
 -- Section 2: Test suite against application.           --
@@ -139,14 +120,14 @@ app state mvar = makeSnaplet "app" "An snaplet example application." Nothing $ d
 
 newtype FooFields = FooFields (IO String)
 
-instance Factory App Foo FooFields where
+instance Factory Ctxt Foo FooFields where
   fields = FooFields (return "default")
   save (FooFields as) = do s <- liftIO as
-                           eval (newFoo s "const")
+                           eval (\ctxt -> newFoo ctxt s "const")
 
 tests :: MVar (Map Int Foo) -> MVar () -> Spec
 tests store' mvar =
-  fn (route routes) (app store' mvar) $ do
+  fn site (initializer store' mvar) (const $ return ()) $ do
     describe "requests" $ do
       it "should match selector from a GET request" $ do
         p <- get "/test"
@@ -157,12 +138,12 @@ tests store' mvar =
       it "should have deleted as text on the response" $
         delete "/test" >>= shouldHaveText "deleted"
       it "should not match <html> on POST request" $
-        post "/test" M.empty >>= shouldNotHaveText "<html>"
+        post "/test" [] >>= shouldNotHaveText "<html>"
       it "should post parameters" $ do
         post "/params" [("q", "hello")] >>= shouldHaveText "POST hello"
         post "/params" [("r", "hello")] >>= shouldNotHaveText "hello"
       it "basic equality" $ do
-        eval (return 1) >>= shouldEqual (1::Integer)
+        eval (\_ -> return 1) >>= shouldEqual (1::Integer)
         shouldNotEqual 1 (2::Integer)
       it "status code 200" $ do
         get "/test" >>= should200
@@ -178,20 +159,18 @@ tests store' mvar =
         get "/redirect" >>= shouldNot300To "/redirect"
         get "/test" >>= shouldNot300To "/redirect"
       it "differentiates between response content types" $ do
-        Json _ raw <- get "/json"
-        Just exampleObj `shouldEqual` decode raw
         Html _ doc <- get "/test"
         doc `shouldEqual` html
     describe "stateful changes" $ do
-      let isE = use mv >>= \m -> liftIO $ isEmptyMVar m
+      let isE ctxt = isEmptyMVar (view mv ctxt)
       after (\_ -> void $ tryTakeMVar mvar) $
         it "should reflect stateful in handler" $ do
          eval isE >>= shouldEqual True
-         void $ post "/setmv" M.empty
+         void $ post "/setmv" []
          eval isE >>= shouldEqual False
-         void $ post "/setmv" M.empty
+         void $ post "/setmv" []
          eval isE >>= shouldEqual False
-         eval (use mv >>= \m -> void $ liftIO $ tryTakeMVar m)
+         eval (\ctxt -> void $ tryTakeMVar (view mv ctxt))
       it "cleans up" $ eval isE >>= shouldEqual True
       {-
     describe "forms" $ do
@@ -235,7 +214,7 @@ tests store' mvar =
     describe "factories" $ do
       it "should be able to generate a foo" $
         do (Foo i _ _) <- create id
-           Just (Foo _ _ s) <- eval (lookupFoo i)
+           Just (Foo _ _ s) <- eval (\ctxt -> lookupFoo ctxt i)
            s `shouldEqual` "const"
       it "should be able to modify defaulted values" $
         do (Foo _ s' _) <- create (\_ -> FooFields (return "Hi!"))

@@ -10,7 +10,7 @@
 {-# LANGUAGE TypeFamilies               #-}
 {-# LANGUAGE TypeSynonymInstances       #-}
 
-module Test.Hspec.Snap (
+module Test.Hspec.Fn (
   -- * Running blocks of hspec-snap tests
     fn
   , modifySite
@@ -69,50 +69,50 @@ module Test.Hspec.Snap (
   , evalHandlerSafe
   ) where
 
-import           Control.Applicative       ((<$>))
-import           Control.Concurrent.MVar   (MVar, newEmptyMVar, newMVar,
-                                            putMVar, readMVar, takeMVar)
+import           Control.Applicative          ((<$>))
+import           Control.Concurrent.MVar      (MVar, newEmptyMVar, newMVar,
+                                               putMVar, readMVar, takeMVar)
 
-import           Blaze.ByteString.Builder  (toByteString)
-import           Control.Exception         (SomeException, catch)
-import Control.Arrow ((***))
-import           Control.Monad             (void)
-import           Control.Monad.State       (StateT (..), runStateT)
-import qualified Control.Monad.State       as S (get, put)
-import           Control.Monad.Trans       (liftIO)
-import           Data.Aeson                (ToJSON, encode)
-import           Data.ByteString           (ByteString)
-import qualified Data.ByteString as B (unpack, empty)
-import           Data.ByteString.Lazy      (fromStrict, toStrict)
-import qualified Data.ByteString.Lazy      as LBS
-import           Data.IORef                (atomicModifyIORef, newIORef,
-                                            readIORef)
-import Data.List (intersperse)
-import qualified Data.Map                  as M
-import           Data.Maybe                (fromMaybe)
-import           Data.Monoid               (mappend, mempty, (<>), mconcat)
-import           Data.Text                 (Text)
-import qualified Data.Text                 as T
-import qualified Data.Text.Encoding        as T
-import           Network.HTTP.Types        (SimpleQuery, methodDelete,
-                                            simpleQueryToQuery)
-import           Network.HTTP.Types.Header (hLocation, hContentType)
-import           Network.HTTP.Types.Status (Status (..))
-import           Network.Wai               (Request (..), Response (..),
-                                            defaultRequest, responseHeaders,
-                                            responseStatus, responseToStream)
-import Network.Wai.Test (setPath)
-import Data.Word (Word8)
-import Data.ByteString.Lazy.Builder (Builder)
+import           Blaze.ByteString.Builder     (toByteString)
+import           Control.Arrow                ((***))
+import           Control.Exception            (SomeException, catch)
+import           Control.Monad                (void)
+import           Control.Monad.State          (StateT (..), runStateT)
+import qualified Control.Monad.State          as S (get, put)
+import           Control.Monad.Trans          (liftIO)
+import           Data.Aeson                   (ToJSON, encode)
+import           Data.ByteString              (ByteString)
+import qualified Data.ByteString              as B (empty, unpack)
+import           Data.ByteString.Lazy         (fromStrict, toStrict)
+import qualified Data.ByteString.Lazy         as LBS
+import           Data.ByteString.Lazy.Builder (Builder)
 import qualified Data.ByteString.Lazy.Builder as Builder
-import qualified Data.Char as Char
+import qualified Data.Char                    as Char
+import           Data.IORef                   (atomicModifyIORef, newIORef,
+                                               readIORef)
+import           Data.List                    (intersperse)
+import qualified Data.Map                     as M
+import           Data.Maybe                   (fromMaybe)
+import           Data.Monoid                  (mappend, mconcat, mempty, (<>))
+import           Data.Text                    (Text)
+import qualified Data.Text                    as T
+import qualified Data.Text.Encoding           as T
+import           Data.Word                    (Word8)
+import           Network.HTTP.Types           (SimpleQuery, methodDelete,
+                                               methodPost, simpleQueryToQuery)
+import           Network.HTTP.Types.Header    (hContentType, hLocation)
+import           Network.HTTP.Types.Status    (Status (..))
+import           Network.Wai                  (Request (..), Response (..),
+                                               defaultRequest, responseHeaders,
+                                               responseStatus, responseToStream)
+import           Network.Wai.Test             (setPath)
 import           Test.Hspec
 import           Test.Hspec.Core.Spec
-import qualified Text.Digestive            as DF
-import qualified Text.HandsomeSoup         as HS
-import qualified Text.XML.HXT.Core         as HXT
-import           Web.Fn                    (RequestContext, defaultFnRequest,
-                                            setRequest)
+import qualified Text.Digestive               as DF
+import qualified Text.HandsomeSoup            as HS
+import qualified Text.XML.HXT.Core            as HXT
+import           Web.Fn                       (RequestContext, defaultFnRequest,
+                                               setRequest)
 
 -- derives Num and Ord to avoid excessive newtype wrapping and unwrapping
 -- in pattern matching, etc.
@@ -232,7 +232,7 @@ beforeEval h = beforeWith (\state@(FnHspecState _r _site init _ _) -> do void $ 
 
 -- | Runs a DELETE request
 delete :: RequestContext ctxt => Text -> FnHspecM ctxt TestResponse
-delete path = runRequest (defaultRequest { requestMethod = methodDelete })
+delete path = runRequest (setPath defaultRequest { requestMethod = methodDelete } (T.encodeUtf8 path))
 
 -- | Runs a GET request.
 -- | Runs a GET request, with a set of parameters.
@@ -247,7 +247,7 @@ post :: RequestContext ctxt => Text -> SimpleQuery -> FnHspecM ctxt TestResponse
 post path ps = do
    req <- liftIO $ postUrlEncoded (T.encodeUtf8 path) ps
    runRequest req
-   
+
 {-
 -- | Creates a new POST request with a given JSON value as the request body.
 postJson :: ToJSON tj => Text -> tj -> FnHspecM ctxt TestResponse
@@ -259,11 +259,13 @@ postUrlEncoded :: ByteString -> SimpleQuery -> IO Request
 postUrlEncoded path ps = do
   let bod = formUrlEncodeQuery (simpleQueryToParams ps)
   refChunks <- newIORef $ LBS.toChunks bod
-  let req = defaultRequest { rawPathInfo = path
-                           , requestBody = atomicModifyIORef refChunks $ \bss ->
-                                    case bss of 
-                                      [] -> ([], B.empty)
-                                      x:y -> (y, x) }
+  let req = setPath defaultRequest { requestBody = atomicModifyIORef refChunks $ \bss ->
+                                       case bss of
+                                         [] -> ([], B.empty)
+                                         x:y -> (y, x)
+                                   , requestMethod = methodPost
+                                   , requestHeaders = [(hContentType, "application/x-www-form-urlencoded")] }
+                   path
   return req
 
 simpleQueryToParams :: SimpleQuery -> [(String, String)]
@@ -278,9 +280,9 @@ put path qs = put' path "application/x-www-form-urlencoded" (simpleQueryToParams
 put' :: Text -> Text -> SimpleQuery -> FnHspecM ctxt TestResponse
 put' path mime params' = runRequest $ do
   put'' (T.encodeUtf8 path) (T.encodeUtf8 mime) ""
-  setQueryString (simpleQuerytoParams params') 
+  setQueryString (simpleQuerytoParams params')
 
-put'' = undefined 
+put'' = undefined
 setQueryString = undefined -}
 
 formUrlEncodeQuery :: [(String, String)] -> LBS.ByteString
@@ -481,8 +483,8 @@ shouldHaveText :: Text -> TestResponse -> FnHspecM ctxt ()
 shouldHaveText match (Html _ body) =
   if T.isInfixOf match body
   then setResult Success
-  else setResult (Fail Nothing $ T.unpack $ T.concat [body, "' contains '", match, "'."])
-shouldHaveText match _ = setResult (Fail Nothing (T.unpack $ T.concat ["Body contains: ", match]))
+  else setResult (Fail Nothing $ T.unpack $ T.concat [body, "' does not contain '", match, "'."])
+shouldHaveText match resp = setResult (Fail Nothing (T.unpack $ T.concat [T.pack (show resp), " does not contain: ", match]))
 
 -- | Asserts that the response (which should be Html) does not contain the given text.
 shouldNotHaveText :: Text -> TestResponse -> FnHspecM ctxt ()
@@ -588,9 +590,10 @@ runHandlerSafe :: RequestContext ctxt
                -> ctxt
                -> IO (Either Text (Response))
 runHandlerSafe req site ctxt =
-  catch (Right <$> (site $ setRequest ctxt (req, snd defaultFnRequest)))
-    (\(e::SomeException) ->
-      return $ Left (T.pack $ show e))
+  do mv <- newMVar Nothing
+     catch (Right <$> (site $ setRequest ctxt (req, Just mv)))
+      (\(e::SomeException) ->
+        return $ Left (T.pack $ show e))
 
 -- | Evaluates a given handler with the given state. Returns any
 -- triggered exception, or the value produced.
