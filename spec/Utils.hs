@@ -13,6 +13,8 @@ import           Control.Applicative     ((<$>))
 import           Snap.Core               (modifyResponse, readRequestBody
                                          ,setHeader, writeLBS ,MonadSnap)
 
+{--
+
 -- | Attempts to parse JSON from a request body of max 1MiB
 parseJsonBody :: (MonadSnap m, FromJSON fj) => m (Maybe fj)
 parseJsonBody = decode <$> readRequestBody 1048576
@@ -30,3 +32,4 @@ writeJSON a = do
 -- | Mark response as 'application/json'
 jsonResponse :: MonadSnap m => m ()
 jsonResponse = modifyResponse $ setHeader "Content-Type" "application/json"
+-}

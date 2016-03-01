@@ -56,38 +56,34 @@ import           Text.Digestive
 import           Test.Hspec
 import           Test.Hspec.Snap
 
-import           Utils                                       (writeJSON
-                                                             ,parseJsonBody)
-
 ----------------------------------------------------------
 -- Section 1: Example application used for testing.     --
 ----------------------------------------------------------
 data Foo = Foo Int String String
-data App = App { _mv :: MVar (), _store :: MVar (Map Int Foo), _sess :: Snaplet SessionManager }
+data Ctxt = Ctxt { _req :: FnRequest
+                 , _mv :: MVar ()
+                 , _store :: MVar (Map Int Foo) }
 
 makeLenses ''App
 
-newFoo :: String -> String -> Handler App App Foo
-newFoo s1 s2 = do smvar <- use store
-                  mp <- liftIO $ takeMVar smvar
-                  let i = 1 + M.size mp
-                  let foo = Foo i s1 s2
-                  liftIO $ putMVar smvar (M.insert i foo mp)
-                  return foo
+newFoo :: Ctxt -> String -> String -> IO (Foo)
+newFoo ctxt s1 s2 = do smvar <- view store ctxt
+                       mp <- takeMVar smvar
+                       let i = 1 + M.size mp
+                       let foo = Foo i s1 s2
+                       putMVar smvar (M.insert i foo mp)
+                       return foo
 
-lookupFoo :: Int -> Handler App App (Maybe Foo)
-lookupFoo i = do smvar <- use store
-                 mp <- liftIO $ takeMVar smvar
-                 liftIO $ putMVar smvar mp
-                 return (M.lookup i mp)
-
-instance HasSession App where
-  getSessionLens = sess
+lookupFoo :: Ctxt -> Int -> IO (Maybe Foo)
+lookupFoo ctxt i = do smvar <- view store ctxt
+                      mp <- takeMVar smvar
+                      putMVar smvar mp
+                      return (M.lookup i mp)
 
 html :: Text
 html = "<html><table><tr><td>One</td><td>Two</td></tr></table></html>"
 
-testForm :: Form Text (Handler App App) (Text, Text)
+testForm :: Form Text IO (Text, Text)
 testForm = (,) <$> "a" .: check "Should not be empty" (not . T.null) (text Nothing)
                <*> "b" .: text Nothing
 
@@ -106,37 +102,26 @@ instance FromJSON ExampleObject where
 exampleObj :: ExampleObject
 exampleObj = ExampleObject 42 "foo"
 
-writeParamsAndMethod :: Maybe ByteString -> Snap.Method -> Handler App App ()
-writeParamsAndMethod mq m = case m of
-                              POST -> writeBS $ methodAndParam "POST "
-                              PUT  -> writeBS $ methodAndParam "PUT "
-                              _    -> writeBS "Not valid"
+paramsAndMethodHandler :: Ctxt -> Text -> IO (Maybe Response)
+paramsAndMethodHandler ctxt q = do
+  let m = requestMethod (_req ctxt)
+  case m of
+    POST -> okText $ methodAndParam "POST "
+    PUT  -> okText $ methodAndParam "PUT "
+    _    -> okText "Not valid"
   where
-    methodAndParam p = BS.concat [p, fromMaybe "" mq]
+    methodAndParam p = T.concat [p, q]
 
 routes :: [(ByteString, Handler App App ())]
-routes = [("/test", method GET $ writeText html)
-         ,("/test", method POST $ writeText "")
-         ,("/test", method DELETE $ writeText "deleted")
-         ,("/test", method PUT $ writeText "")
-         ,("/params", do mq <- getParam "q"
-                         writeParamsAndMethod mq =<< (Snap.rqMethod <$> Snap.getRequest))
-         ,("/redirect", Snap.redirect "/test")
-         ,("/setmv", do m <- use mv
-                        void $ liftIO $ tryPutMVar m ()
-                        return ())
-         ,("/setsess/:k", do Just k <- fmap T.decodeUtf8 <$> getParam "k"
-                             with sess $ setInSession k "bar" >> commitSession
-                             writeText "")
-         ,("/getsess/:k", do Just k <- fmap T.decodeUtf8 <$> getParam "k"
-                             Just r <- with sess $ getFromSession k
-                             writeText r)
-         ,("/json", writeJSON exampleObj)
-         ,("/postJson", do
-                          Just (ExampleObject i t) <- parseJsonBody
-                          writeJSON $ ExampleObject (i + 1)
-                                                    (t `T.append` "!")
-                          )
+routes = [ method GET // path "test" ==> (\_ -> okText html)
+         , method POST // path "test" ==> (\_ -> okText "")
+         , path "test" // method DELETE ==> (\_ -> okText "deleted")
+         , path "test" // method PUT ==> (\_ -> okText "")
+         , path "params" // param "q" ==> writeParamsAndMethod mq
+         , path "redirect" ==> (\_ -> redirect "test")
+         , path "setmv" ==> (\ctxt -> do m <- view mv ctxt
+                                         void $ liftIO $ tryPutMVar m ()
+                                         return ())
          ]
 
 app :: MVar (Map Int Foo) -> MVar () -> SnapletInit App App
@@ -161,7 +146,7 @@ instance Factory App Foo FooFields where
 
 tests :: MVar (Map Int Foo) -> MVar () -> Spec
 tests store' mvar =
-  snap (route routes) (app store' mvar) $ do
+  fn (route routes) (app store' mvar) $ do
     describe "requests" $ do
       it "should match selector from a GET request" $ do
         p <- get "/test"
@@ -174,17 +159,8 @@ tests store' mvar =
       it "should not match <html> on POST request" $
         post "/test" M.empty >>= shouldNotHaveText "<html>"
       it "should post parameters" $ do
-        post "/params" (params [("q", "hello")]) >>= shouldHaveText "POST hello"
-        post "/params" (params [("r", "hello")]) >>= shouldNotHaveText "hello"
-      it "should post json" $ do
-        resp@(Json _ raw) <- postJson "/postJson" exampleObj
-        should200 resp
-        Just (ExampleObject 43 "foo!") `shouldEqual` decode raw
-      it "should not match <html> on PUT request" $
-        put "/test" M.empty >>= shouldNotHaveText "<html>"
-      it "should put parameters" $ do
-        put "/params" (params [("q", "hello")]) >>= shouldHaveText "PUT hello"
-        put "/params" (params [("r", "hello")]) >>= shouldNotHaveText "hello"
+        post "/params" [("q", "hello")] >>= shouldHaveText "POST hello"
+        post "/params" [("r", "hello")] >>= shouldNotHaveText "hello"
       it "basic equality" $ do
         eval (return 1) >>= shouldEqual (1::Integer)
         shouldNotEqual 1 (2::Integer)
@@ -217,6 +193,7 @@ tests store' mvar =
          eval isE >>= shouldEqual False
          eval (use mv >>= \m -> void $ liftIO $ tryTakeMVar m)
       it "cleans up" $ eval isE >>= shouldEqual True
+      {-
     describe "forms" $ do
       it "should pass valid data" $ do
         form (Value ("foo", "bar")) testForm (M.fromList [("a", "foo"), ("b", "bar")])
@@ -226,7 +203,8 @@ tests store' mvar =
         form (ErrorPaths ["a"]) testForm (M.fromList [("b", "bar")])
         form (ErrorPaths ["a"]) testForm (M.fromList [])
       it "should call predicates on valid data" $
-        form (Predicate (("oo" `T.isInfixOf`) . fst)) testForm (M.fromList [("a", "foobar")])
+        form (Predicate (("oo" `T.isInfixOf`) . fst)) testForm (M.fromList [("a", "foobar")])-}
+              {-
     describe "sessions" $ do
       it "should be able to modify session in handlers" $
         recordSession $ do void $ get "/setsess/4"
@@ -253,6 +231,7 @@ tests store' mvar =
                            sessionShouldContain "foobar"
                            eval (with sess $ deleteFromSession "foobar" >> commitSession)
                            sessionShouldNotContain "foobar"
+                           -}
     describe "factories" $ do
       it "should be able to generate a foo" $
         do (Foo i _ _) <- create id
