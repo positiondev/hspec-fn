@@ -218,7 +218,7 @@ modifySite' f a = do (FnHspecState r site i bef aft) <- S.get
                      a
 
 -- | Evaluate a Handler action after each test.
-afterEval :: (ctxt -> IO Response) -> SpecWith (FnHspecState ctxt) -> SpecWith (FnHspecState ctxt)
+afterEval :: (ctxt -> IO ()) -> SpecWith (FnHspecState ctxt) -> SpecWith (FnHspecState ctxt)
 afterEval h = after (\(FnHspecState _r _site i _ _) ->
                        do res <- evalHandlerSafe h i
                           case res of
@@ -226,8 +226,8 @@ afterEval h = after (\(FnHspecState _r _site i _ _) ->
                             Left msg -> liftIO $ print msg)
 
 -- | Evaluate a Handler action before each test.
-beforeEval :: (ctxt -> IO Response) -> SpecWith (FnHspecState ctxt) -> SpecWith (FnHspecState ctxt)
-beforeEval h = beforeWith (\state@(FnHspecState _r _site init _ _) -> do void $ evalHandlerSafe h init
+beforeEval :: (ctxt -> IO ()) -> SpecWith (FnHspecState ctxt) -> SpecWith (FnHspecState ctxt)
+beforeEval h = beforeWith (\state@(FnHspecState _r _site init _ _) -> do evalHandlerSafe h init
                                                                          return state)
 
 -- | Runs a DELETE request
@@ -238,6 +238,8 @@ delete path = runRequest (setPath defaultRequest { requestMethod = methodDelete 
 -- | Runs a GET request, with a set of parameters.
 get :: RequestContext ctxt =>  Text -> FnHspecM ctxt TestResponse
 get path = runRequest (get' (T.encodeUtf8 path))
+
+
 
 get' :: ByteString -> Request
 get' path = setPath defaultRequest path
