@@ -37,7 +37,7 @@ library
                  , fn
                  , blaze-builder
 
-Test-Suite test-hspec-snap
+Test-Suite test-hspec-fn
   type:            exitcode-stdio-1.0
   hs-source-dirs:  spec
   main-is:         Main.hs
