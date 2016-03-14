@@ -102,7 +102,8 @@ import           Network.HTTP.Types           (SimpleQuery, methodDelete,
                                                methodPost, simpleQueryToQuery)
 import           Network.HTTP.Types.Header    (hContentType, hLocation)
 import           Network.HTTP.Types.Status    (Status (..))
-import           Network.Wai                  (Request (..), Response (..),
+import           Network.Wai                  (Application, Middleware,
+                                               Request (..), Response (..),
                                                defaultRequest, responseHeaders,
                                                responseStatus, responseToStream)
 import           Network.Wai.Test             (setPath)
@@ -140,15 +141,15 @@ type FnHspecM b = StateT (FnHspecState b) IO
 -- The fields it contains, in order, are:
 --
 -- > Result
--- > Main handler
--- > Startup state
+-- > Application
 -- > Startup state
 -- > Session state
 -- > Before handler (runs before each eval)
 -- > After handler (runs after each eval).
 data FnHspecState ctxt = FnHspecState Result
-                                      (ctxt -> IO Response)
+                                      Application
                                       ctxt
+                                      {-(MVar [(Text, Text)])-}
                                       (ctxt -> IO ())
                                       (ctxt -> IO ())
 
@@ -192,29 +193,31 @@ class Factory b a d | a -> b, a -> d, d -> a where
 -- suite can have multiple calls to `snap`, though each one will cause
 -- the site initializer to run, which is often a slow operation (and
 -- will slow down test suites).
-fn :: (ctxt -> IO Response) -> IO ctxt -> (ctxt -> IO ()) -> SpecWith (FnHspecState ctxt) -> Spec
-fn site initializer shutdown spec = do
+fn :: IO ctxt -> (ctxt -> IO Application) -> (ctxt -> IO ()) -> SpecWith (FnHspecState ctxt) -> Spec
+fn initializer mkApp shutdown spec = do
   initCtxt <- runIO initializer
+  application <- runIO (mkApp initCtxt)
+  mv <- runIO (newMVar [])
   afterAll (const $ shutdown initCtxt) $
-    before (return (FnHspecState Success site initCtxt (const $ return ()) (const $ return ()))) spec
+    before (return (FnHspecState Success application initCtxt mv (const $ return ()) (const $ return ()))) spec
 
--- | This allows you to change the default handler you are running
+-- | This allows you to change the Application you are running
 -- requests against within a block. This is most likely useful for
 -- setting request state (for example, logging a user in).
-modifySite :: ((ctxt -> IO Response) -> (ctxt -> IO Response))
+modifySite :: Middleware
            -> SpecWith (FnHspecState ctxt)
            -> SpecWith (FnHspecState ctxt)
-modifySite f = beforeWith (\(FnHspecState r site initst bef aft) ->
-                             return (FnHspecState r (f site) initst bef aft))
+modifySite f = beforeWith (\(FnHspecState r site initst sess bef aft) ->
+                             return (FnHspecState r (f site) initst sess bef aft))
 
 -- | This performs a similar operation to `modifySite` but in the context
 -- of `FnHspecM` (which is needed if you need to `eval`, produce values, and
 -- hand them somewhere else (so they can't be created within `f`).
-modifySite' :: ((ctxt -> IO Response) -> (ctxt -> IO Response))
+modifySite' :: Middleware
             -> FnHspecM ctxt a
             -> FnHspecM ctxt a
-modifySite' f a = do (FnHspecState r site i bef aft) <- S.get
-                     S.put (FnHspecState r (f site) i bef aft)
+modifySite' f a = do (FnHspecState r site i sess bef aft) <- S.get
+                     S.put (FnHspecState r (f site) i sess bef aft)
                      a
 
 -- | Evaluate a Handler action after each test.
@@ -496,6 +499,49 @@ shouldNotHaveText match (Html _ body) =
   else setResult Success
 shouldNotHaveText _ _ = setResult Success
 
+-- class HasSession b where
+--   getSession :: b -> Vault.Key (Session IO Text (Maybe Text))
+
+-- recordSession :: (RequestContext b, HasSession b) => FnHspecM b a -> FnHspecM b a
+-- recordSession a =
+--   do (FnHspecState r site s ctxt mv bef aft) <- S.get
+--      S.put (FnHspecState r site s i mv
+--             (do ps <- liftIO $ readMVar mv
+--                 let Just (_, setsess) = Vault.lookup (getSession ctxt) (vault (fst (getRequest ctxt)))
+--                 mapM_ (uncurry setsess) ps)
+--             (do let Just (getsess) = Vault.lookup (getSession ctxt) (vault (fst (getRequest ctxt)))
+
+--                 ps' <- with getSessionLens sessionToList
+--                 void . liftIO $ takeMVar mv
+--                 liftIO $ putMVar mv ps'))
+--      res <- a
+--      (SnapHspecState r' _ _ _ _ _ _) <- S.get
+--      void . liftIO $ takeMVar mv
+--      liftIO $ putMVar mv []
+--      S.put (SnapHspecState r' site s i mv bef aft)
+--      return res
+
+-- sessContents :: SnapHspecM b Text
+-- sessContents = do
+--   (SnapHspecState _ _ _ _ mv _ _) <- S.get
+--   ps <- liftIO $ readMVar mv
+--   return $ T.concat (map (uncurry T.append) ps)
+
+-- sessionShouldContain :: Text -> SnapHspecM b ()
+-- sessionShouldContain t =
+--   do contents <- sessContents
+--      if t `T.isInfixOf` contents
+--        then setResult Success
+--        else setResult (Fail Nothing $ "Session did not contain: " ++ T.unpack t
+--                                     ++ "\n\nSession was:\n" ++ T.unpack contents)
+
+-- sessionShouldNotContain :: Text -> SnapHspecM b ()
+-- sessionShouldNotContain t =
+--   do contents <- sessContents
+--      if t `T.isInfixOf` contents
+--        then setResult (Fail Nothing $ "Session should not have contained: " ++ T.unpack t
+--                                     ++ "\n\nSession was:\n" ++ T.unpack contents)
+--        else setResult Success
 
 -- | A data type for tests against forms.
 data FormExpectations a = Value a           -- ^ The value the form should take (and should be valid)
