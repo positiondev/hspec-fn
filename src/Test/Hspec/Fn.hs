@@ -142,13 +142,15 @@ type FnHspecM b = StateT (FnHspecState b) IO
 -- The fields it contains, in order, are:
 --
 -- > Result
--- > Application
+-- > Core Application
+-- > Application Middleware
 -- > Startup state
 -- > Session state
 -- > Before handler (runs before each eval)
 -- > After handler (runs after each eval).
 data FnHspecState ctxt = FnHspecState Result
                                       Application
+                                      [Middleware]
                                       ctxt
                                       (ctxt -> IO ())
                                       (ctxt -> IO ())
@@ -158,7 +160,7 @@ instance Example (FnHspecM b ()) where
   type Arg (FnHspecM b ()) = FnHspecState b
   evaluateExample s _ cb _ =
     do mv <- newEmptyMVar
-       cb $ \st -> do ((),FnHspecState r' _ _ _ _) <- runStateT s st
+       cb $ \st -> do ((),FnHspecState r' _ _ _ _ _) <- runStateT s st
                       putMVar mv r'
        takeMVar mv
 
@@ -193,35 +195,38 @@ class Factory b a d | a -> b, a -> d, d -> a where
 -- suite can have multiple calls to `snap`, though each one will cause
 -- the site initializer to run, which is often a slow operation (and
 -- will slow down test suites).
-fn :: IO ctxt -> (ctxt -> IO Application) -> (ctxt -> IO ()) -> SpecWith (FnHspecState ctxt) -> Spec
-fn initializer mkApp shutdown spec = do
+fn :: IO ctxt -> (ctxt -> IO Application) -> [Middleware] -> (ctxt -> IO ()) -> SpecWith (FnHspecState ctxt) -> Spec
+fn initializer mkApp middleware shutdown spec = do
   initCtxt <- runIO initializer
   application <- runIO (mkApp initCtxt)
   afterAll (const $ shutdown initCtxt) $
-    before (return (FnHspecState Success application initCtxt (const $ return ()) (const $ return ()))) spec
+    before (return (FnHspecState Success application middleware initCtxt (const $ return ()) (const $ return ()))) spec
 
 -- | This allows you to change the Application you are running
 -- requests against within a block. This is most likely useful for
 -- setting request state (for example, logging a user in).
-modifySite :: Middleware
+modifySite :: (ctxt -> IO Middleware)
            -> SpecWith (FnHspecState ctxt)
            -> SpecWith (FnHspecState ctxt)
-modifySite f = beforeWith (\(FnHspecState r site initst bef aft) ->
-                             return (FnHspecState r (f site) initst bef aft))
+modifySite f =
+  beforeWith (\(FnHspecState r app mids ctxt bef aft) ->
+                do newmid <- liftIO $ f ctxt
+                   return (FnHspecState r app (mids ++ [newmid]) ctxt bef aft))
 
 -- | This performs a similar operation to `modifySite` but in the context
 -- of `FnHspecM` (which is needed if you need to `eval`, produce values, and
 -- hand them somewhere else (so they can't be created within `f`).
-modifySite' :: Middleware
+modifySite' :: (ctxt -> IO Middleware)
             -> FnHspecM ctxt a
             -> FnHspecM ctxt a
-modifySite' f a = do (FnHspecState r site i bef aft) <- S.get
-                     S.put (FnHspecState r (f site) i bef aft)
+modifySite' f a = do (FnHspecState r app mids i bef aft) <- S.get
+                     newmid <- liftIO $ f i
+                     S.put (FnHspecState r app (mids ++ [newmid]) i bef aft)
                      a
 
 -- | Evaluate a Handler action after each test.
 afterEval :: (ctxt -> IO ()) -> SpecWith (FnHspecState ctxt) -> SpecWith (FnHspecState ctxt)
-afterEval h = after (\(FnHspecState _r _site i _ _) ->
+afterEval h = after (\(FnHspecState _r _site _ i _ _) ->
                        do res <- evalHandlerSafe h i
                           case res of
                             Right _ -> return ()
@@ -229,8 +234,8 @@ afterEval h = after (\(FnHspecState _r _site i _ _) ->
 
 -- | Evaluate a Handler action before each test.
 beforeEval :: (ctxt -> IO ()) -> SpecWith (FnHspecState ctxt) -> SpecWith (FnHspecState ctxt)
-beforeEval h = beforeWith (\state@(FnHspecState _r _site init _ _) -> do evalHandlerSafe h init
-                                                                         return state)
+beforeEval h = beforeWith (\state@(FnHspecState _r _site _ init _ _) -> do evalHandlerSafe h init
+                                                                           return state)
 
 -- | Runs a DELETE request
 delete :: RequestContext ctxt => Text -> FnHspecM ctxt TestResponse
@@ -355,7 +360,7 @@ restrictResponse _ r = r
 
 -- | Runs an arbitrary stateful action from your application.
 eval :: (ctxt -> IO a) -> FnHspecM ctxt a
-eval act = do (FnHspecState _ site is bef aft) <- S.get
+eval act = do (FnHspecState _ site _ is bef aft) <- S.get
               liftIO $ either (error . T.unpack) id <$> evalHandlerSafe (do bef
                                                                             r <- act
                                                                             aft
@@ -364,9 +369,9 @@ eval act = do (FnHspecState _ site is bef aft) <- S.get
 -- | Records a test Success or Fail. Only the first Fail will be
 -- recorded (and will cause the whole block to Fail).
 setResult :: Result -> FnHspecM ctxt ()
-setResult r = do (FnHspecState r' s i bef aft) <- S.get
+setResult r = do (FnHspecState r' s ms i bef aft) <- S.get
                  case r' of
-                   Success -> S.put (FnHspecState r s i bef aft)
+                   Success -> S.put (FnHspecState r s ms i bef aft)
                    _ -> return ()
 
 -- | Asserts that a given stateful action will produce a specific different result after
@@ -591,12 +596,13 @@ form expected theForm theParams =
 -- | Runs a request (built with helpers from Snap.Test), resulting in a response.
 runRequest :: RequestContext ctxt => Request -> FnHspecM ctxt TestResponse
 runRequest req = do
-  (FnHspecState _ application is bef aft) <- S.get
+  (FnHspecState _ application mids is bef aft) <- S.get
   res <- liftIO $ runHandlerSafe req
                   (\ctxt -> do bef ctxt
                                mv <- newEmptyMVar
-                               application req (\resp -> do putMVar mv resp
-                                                            return ResponseReceived)
+                               (foldr ($) application mids) req
+                                      (\resp -> do putMVar mv resp
+                                                   return ResponseReceived)
                                aft ctxt
                                takeMVar mv) is
   case res of
