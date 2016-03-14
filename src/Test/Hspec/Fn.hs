@@ -106,6 +106,7 @@ import           Network.Wai                  (Application, Middleware,
                                                Request (..), Response (..),
                                                defaultRequest, responseHeaders,
                                                responseStatus, responseToStream)
+import           Network.Wai.Internal         (ResponseReceived (..))
 import           Network.Wai.Test             (setPath)
 import           Test.Hspec
 import           Test.Hspec.Core.Spec
@@ -149,7 +150,6 @@ type FnHspecM b = StateT (FnHspecState b) IO
 data FnHspecState ctxt = FnHspecState Result
                                       Application
                                       ctxt
-                                      {-(MVar [(Text, Text)])-}
                                       (ctxt -> IO ())
                                       (ctxt -> IO ())
 
@@ -197,9 +197,8 @@ fn :: IO ctxt -> (ctxt -> IO Application) -> (ctxt -> IO ()) -> SpecWith (FnHspe
 fn initializer mkApp shutdown spec = do
   initCtxt <- runIO initializer
   application <- runIO (mkApp initCtxt)
-  mv <- runIO (newMVar [])
   afterAll (const $ shutdown initCtxt) $
-    before (return (FnHspecState Success application initCtxt mv (const $ return ()) (const $ return ()))) spec
+    before (return (FnHspecState Success application initCtxt (const $ return ()) (const $ return ()))) spec
 
 -- | This allows you to change the Application you are running
 -- requests against within a block. This is most likely useful for
@@ -207,8 +206,8 @@ fn initializer mkApp shutdown spec = do
 modifySite :: Middleware
            -> SpecWith (FnHspecState ctxt)
            -> SpecWith (FnHspecState ctxt)
-modifySite f = beforeWith (\(FnHspecState r site initst sess bef aft) ->
-                             return (FnHspecState r (f site) initst sess bef aft))
+modifySite f = beforeWith (\(FnHspecState r site initst bef aft) ->
+                             return (FnHspecState r (f site) initst bef aft))
 
 -- | This performs a similar operation to `modifySite` but in the context
 -- of `FnHspecM` (which is needed if you need to `eval`, produce values, and
@@ -216,8 +215,8 @@ modifySite f = beforeWith (\(FnHspecState r site initst sess bef aft) ->
 modifySite' :: Middleware
             -> FnHspecM ctxt a
             -> FnHspecM ctxt a
-modifySite' f a = do (FnHspecState r site i sess bef aft) <- S.get
-                     S.put (FnHspecState r (f site) i sess bef aft)
+modifySite' f a = do (FnHspecState r site i bef aft) <- S.get
+                     S.put (FnHspecState r (f site) i bef aft)
                      a
 
 -- | Evaluate a Handler action after each test.
@@ -592,12 +591,14 @@ form expected theForm theParams =
 -- | Runs a request (built with helpers from Snap.Test), resulting in a response.
 runRequest :: RequestContext ctxt => Request -> FnHspecM ctxt TestResponse
 runRequest req = do
-  (FnHspecState _ site is bef aft) <- S.get
-  res <- liftIO $ runHandlerSafe req (do
-                                       bef
-                                       resp <- site
-                                       aft
-                                       return resp) is
+  (FnHspecState _ application is bef aft) <- S.get
+  res <- liftIO $ runHandlerSafe req
+                  (\ctxt -> do bef ctxt
+                               mv <- newEmptyMVar
+                               application req (\resp -> do putMVar mv resp
+                                                            return ResponseReceived)
+                               aft ctxt
+                               takeMVar mv) is
   case res of
     Left err ->
       error $ T.unpack err

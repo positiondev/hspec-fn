@@ -127,7 +127,8 @@ instance Factory Ctxt Foo FooFields where
 
 tests :: MVar (Map Int Foo) -> MVar () -> Spec
 tests store' mvar =
-  fn (initializer store' mvar) (\ctxt -> toWAI ctxt site) (const $ return ()) $ do
+  fn (initializer store' mvar) (\ctxt -> return (toWAI ctxt site))
+                               (const $ return ()) $ do
     describe "requests" $ do
       it "should match selector from a GET request" $ do
         p <- get "/test"
