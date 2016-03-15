@@ -632,10 +632,10 @@ parse200 :: Response -> IO TestResponse
 parse200 resp =
     let body        = getResponseBody resp
         headers     = responseHeaders resp
-        contentType = lookup hContentType headers in
-    case contentType of
-      Just "application/json" -> Json 200 . fromStrict <$> body
-      _                       -> Html 200 . T.decodeUtf8 <$> body
+        contentType = T.decodeUtf8 $ fromMaybe "" $ lookup hContentType headers in
+    if "application/json" `T.isPrefixOf` contentType
+      then Json 200 . fromStrict <$> body
+      else Html 200 . T.decodeUtf8 <$> body
 
 -- | Runs a request against a given handler (often the whole site),
 -- with the given state. Returns any triggered exception, or the response.
