@@ -246,12 +246,10 @@ delete path = runRequest (setPath defaultRequest { requestMethod = methodDelete 
 -- | Runs a GET request.
 -- | Runs a GET request, with a set of parameters.
 get :: RequestContext ctxt =>  Text -> FnHspecM ctxt TestResponse
-get path = runRequest (get' (T.encodeUtf8 path))
+get path = runRequest (get' path)
 
-
-
-get' :: ByteString -> Request
-get' path = setPath defaultRequest path
+get' :: Text -> Request
+get' path = setPath defaultRequest (T.encodeUtf8 path)
 
 -- | Creates a new POST request, with a set of parameters.
 post :: RequestContext ctxt => Text -> SimpleQuery -> FnHspecM ctxt TestResponse
