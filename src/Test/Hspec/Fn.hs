@@ -256,7 +256,7 @@ get' path = setPath defaultRequest path
 -- | Creates a new POST request, with a set of parameters.
 post :: RequestContext ctxt => Text -> SimpleQuery -> FnHspecM ctxt TestResponse
 post path ps = do
-   req <- liftIO $ post' (T.encodeUtf8 path) ps
+   req <- liftIO $ post' path ps
    runRequest req
 
 {-
@@ -266,7 +266,7 @@ postJson path json = runRequest $ postRaw (T.encodeUtf8 path)
                                                "application/json"
                                                (toStrict $ encode json) -}
 
-post' :: ByteString -> SimpleQuery -> IO Request
+post' :: Text -> SimpleQuery -> IO Request
 post' path ps = do
   let bod = formUrlEncodeQuery (simpleQueryToParams ps)
   refChunks <- newIORef $ LBS.toChunks bod
@@ -276,7 +276,7 @@ post' path ps = do
                                          x:y -> (y, x)
                                    , requestMethod = methodPost
                                    , requestHeaders = [(hContentType, "application/x-www-form-urlencoded")] }
-                   path
+                   (T.encodeUtf8 path)
   return req
 
 simpleQueryToParams :: SimpleQuery -> [(String, String)]
