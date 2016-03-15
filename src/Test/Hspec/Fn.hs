@@ -30,6 +30,7 @@ module Test.Hspec.Fn (
   , get
   , get'
   , post
+  , post'
 
   -- * Helpers for dealing with TestResponses
   , restrictResponse
@@ -255,7 +256,7 @@ get' path = setPath defaultRequest path
 -- | Creates a new POST request, with a set of parameters.
 post :: RequestContext ctxt => Text -> SimpleQuery -> FnHspecM ctxt TestResponse
 post path ps = do
-   req <- liftIO $ postUrlEncoded (T.encodeUtf8 path) ps
+   req <- liftIO $ post' (T.encodeUtf8 path) ps
    runRequest req
 
 {-
@@ -265,8 +266,8 @@ postJson path json = runRequest $ postRaw (T.encodeUtf8 path)
                                                "application/json"
                                                (toStrict $ encode json) -}
 
-postUrlEncoded :: ByteString -> SimpleQuery -> IO Request
-postUrlEncoded path ps = do
+post' :: ByteString -> SimpleQuery -> IO Request
+post' path ps = do
   let bod = formUrlEncodeQuery (simpleQueryToParams ps)
   refChunks <- newIORef $ LBS.toChunks bod
   let req = setPath defaultRequest { requestBody = atomicModifyIORef refChunks $ \bss ->
