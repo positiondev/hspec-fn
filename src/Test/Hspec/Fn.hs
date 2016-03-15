@@ -93,7 +93,7 @@ import           Data.IORef                   (atomicModifyIORef, newIORef,
                                                readIORef)
 import           Data.List                    (intersperse)
 import qualified Data.Map                     as M
-import           Data.Maybe                   (fromMaybe)
+import           Data.Maybe                   (fromJust, fromMaybe)
 import           Data.Monoid                  (mappend, mconcat, mempty, (<>))
 import           Data.Text                    (Text)
 import qualified Data.Text                    as T
@@ -115,7 +115,7 @@ import qualified Text.Digestive               as DF
 import qualified Text.HandsomeSoup            as HS
 import qualified Text.XML.HXT.Core            as HXT
 import           Web.Fn                       (RequestContext, defaultFnRequest,
-                                               setRequest)
+                                               getRequest, okText, setRequest)
 
 -- derives Num and Ord to avoid excessive newtype wrapping and unwrapping
 -- in pattern matching, etc.
@@ -507,14 +507,20 @@ shouldNotHaveText _ _ = setResult Success
 
 -- | Sets the request used by any calls to 'eval' within the block.
 -- When combined with 'runRequest', you should be able to 'eval' on
--- the same request as a request
-withRequest :: Request -> FnHspecM b a -> FnHspecM b a
-withRequest r t = do (FnHspecState r app mids ctxt bef aft) <- S.get
-                     let (_, mv) = getRequest ctxt
-                     S.put (FnHspecState r app mids (setRequest ctxt (r, mv)) bef aft)
-                     r <- t
-                     S.put (FnHspecState r app mids ctxt bef aft)
-                     return r
+-- the same request as a request. Note: we run the request _through_
+-- the middleware first!
+withRequest :: (RequestContext b) => Request -> FnHspecM b a -> FnHspecM b a
+withRequest rq' t = do (FnHspecState r app mids ctxt bef aft) <- S.get
+                       let (_, mv) = getRequest ctxt
+                       reqmv <- liftIO $ newEmptyMVar
+                       liftIO $ (foldr ($) (\req cont -> do putMVar reqmv req
+                                                            cont =<< fromJust <$> okText "")
+                                           mids) rq' (\resp -> return ResponseReceived)
+                       rq <- liftIO $ takeMVar reqmv
+                       S.put (FnHspecState r app mids (setRequest ctxt (rq, mv)) bef aft)
+                       res <- t
+                       S.put (FnHspecState r app mids ctxt bef aft)
+                       return res
 
 
 
