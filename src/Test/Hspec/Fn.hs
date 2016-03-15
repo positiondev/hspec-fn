@@ -33,6 +33,7 @@ module Test.Hspec.Fn (
 
   -- * Helpers for dealing with TestResponses
   , restrictResponse
+  , withRequest
 
   -- * Evaluating application code
   , eval
@@ -360,11 +361,12 @@ restrictResponse _ r = r
 
 -- | Runs an arbitrary stateful action from your application.
 eval :: (ctxt -> IO a) -> FnHspecM ctxt a
-eval act = do (FnHspecState _ site _ is bef aft) <- S.get
-              liftIO $ either (error . T.unpack) id <$> evalHandlerSafe (do bef
-                                                                            r <- act
-                                                                            aft
-                                                                            return r) is
+eval act = do (FnHspecState _ site _ ctxt bef aft) <- S.get
+              liftIO $ either (error . T.unpack) id <$> evalHandlerSafe
+                                                          (\ctxt -> do bef ctxt
+                                                                       r <- act ctxt
+                                                                       aft ctxt
+                                                                       return r) ctxt
 
 -- | Records a test Success or Fail. Only the first Fail will be
 -- recorded (and will cause the whole block to Fail).
@@ -502,6 +504,19 @@ shouldNotHaveText match (Html _ body) =
   then setResult (Fail Nothing $ T.unpack $ T.concat [body, "' contains '", match, "'."])
   else setResult Success
 shouldNotHaveText _ _ = setResult Success
+
+-- | Sets the request used by any calls to 'eval' within the block.
+-- When combined with 'runRequest', you should be able to 'eval' on
+-- the same request as a request
+withRequest :: Request -> FnHspecM b a -> FnHspecM b a
+withRequest r t = do (FnHspecState r app mids ctxt bef aft) <- S.get
+                     let (_, mv) = getRequest ctxt
+                     S.put (FnHspecState r app mids (setRequest ctxt (r, mv)) bef aft)
+                     r <- t
+                     S.put (FnHspecState r app mids ctxt bef aft)
+                     return r
+
+
 
 -- class HasSession b where
 --   getSession :: b -> Vault.Key (Session IO Text (Maybe Text))
