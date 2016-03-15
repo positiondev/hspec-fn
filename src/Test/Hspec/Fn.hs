@@ -77,7 +77,7 @@ import           Control.Concurrent.MVar      (MVar, newEmptyMVar, newMVar,
 
 import           Blaze.ByteString.Builder     (toByteString)
 import           Control.Arrow                ((***))
-import           Control.Exception            (SomeException, catch)
+import           Control.Exception            (SomeException, catch, throw)
 import           Control.Monad                (void)
 import           Control.Monad.State          (StateT (..), runStateT)
 import qualified Control.Monad.State          as S (get, put)
@@ -157,13 +157,16 @@ data FnHspecState ctxt = FnHspecState Result
                                       (ctxt -> IO ())
                                       (ctxt -> IO ())
 
-
 instance Example (FnHspecM b ()) where
   type Arg (FnHspecM b ()) = FnHspecState b
   evaluateExample s _ cb _ =
     do mv <- newEmptyMVar
-       cb $ \st -> do ((),FnHspecState r' _ _ _ _ _) <- runStateT s st
-                      putMVar mv r'
+       cb $ \st -> do
+         r <- catch 
+              (do ((),FnHspecState r' _ _ _ _ _) <- runStateT s st
+                  return r')
+              return
+         putMVar mv r
        takeMVar mv
 
 -- | Factory instances allow you to easily generate test data.
@@ -371,9 +374,9 @@ eval act = do (FnHspecState _ site _ ctxt bef aft) <- S.get
 -- recorded (and will cause the whole block to Fail).
 setResult :: Result -> FnHspecM ctxt ()
 setResult r = do (FnHspecState r' s ms i bef aft) <- S.get
-                 case r' of
+                 case r of
                    Success -> S.put (FnHspecState r s ms i bef aft)
-                   _ -> return ()
+                   _ -> throw r
 
 -- | Asserts that a given stateful action will produce a specific different result after
 -- an action has been run.
