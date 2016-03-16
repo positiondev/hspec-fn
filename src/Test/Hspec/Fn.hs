@@ -35,6 +35,7 @@ module Test.Hspec.Fn (
   -- * Helpers for dealing with TestResponses
   , restrictResponse
   , withRequest
+  , nowRun
 
   -- * Evaluating application code
   , eval
@@ -162,7 +163,7 @@ instance Example (FnHspecM b ()) where
   evaluateExample s _ cb _ =
     do mv <- newEmptyMVar
        cb $ \st -> do
-         r <- catch 
+         r <- catch
               (do ((),FnHspecState r' _ _ _ _ _) <- runStateT s st
                   return r')
               return
@@ -616,16 +617,27 @@ form expected theForm theParams =
         fixedParams = M.mapKeys (T.append "form.") theParams
 -}
 
--- | Runs a request (built with helpers from Snap.Test), resulting in a response.
+-- | Runs a request (built with helpers), resulting in a response.
 runRequest :: RequestContext ctxt => Request -> FnHspecM ctxt TestResponse
-runRequest req = do
+runRequest = runRequest' True
+
+-- | Runs the request that is in the context. Note: you should only do
+-- this after you've used 'withRequest'.
+nowRun :: RequestContext ctxt => FnHspecM ctxt TestResponse
+nowRun = do (FnHspecState _ _ _ ctxt _ _) <- S.get
+            runRequest' False (fst . getRequest $ ctxt)
+
+runRequest' :: RequestContext ctxt => Bool -> Request -> FnHspecM ctxt TestResponse
+runRequest' runMiddleware req = do
   (FnHspecState _ application mids is bef aft) <- S.get
   res <- liftIO $ runHandlerSafe req
                   (\ctxt -> do bef ctxt
                                mv <- newEmptyMVar
-                               (foldr ($) application mids) req
-                                      (\resp -> do putMVar mv resp
-                                                   return ResponseReceived)
+                               let app = if runMiddleware
+                                            then foldr ($) application mids
+                                            else application
+                               app req (\resp -> do putMVar mv resp
+                                                    return ResponseReceived)
                                aft ctxt
                                takeMVar mv) is
   case res of
