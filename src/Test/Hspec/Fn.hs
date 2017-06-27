@@ -112,13 +112,15 @@ import           Network.Wai                  (Application, Middleware,
 import           Network.Wai.Internal         (ResponseReceived (..))
 import           Network.Wai.Test             (setPath)
 import           Test.Hspec
-import           Test.Hspec.Core.Spec
+import           Test.Hspec.Core.Spec (FailureReason(..), Result(..), Example(..), Location)
 import qualified Text.Digestive               as DF
 import qualified Text.HandsomeSoup            as HS
 import qualified Text.XML.HXT.Core            as HXT
 import           Web.Fn                       (RequestContext, defaultFnRequest,
                                                getRequest, okText, setRequest)
 
+failShim :: Maybe Location -> String -> Result
+failShim mLocation reason = Failure mLocation (Reason reason)
 -- derives Num and Ord to avoid excessive newtype wrapping and unwrapping
 -- in pattern matching, etc.
 newtype RespCode = RespCode Int deriving (Show, Read, Eq, Num, Ord)
@@ -398,7 +400,7 @@ shouldEqual :: (Show a, Eq a)
             -> FnHspecM ctxt ()
 shouldEqual a b = if a == b
                       then setResult Success
-                      else setResult (Fail Nothing ("Should have held: " ++ show a ++ " == " ++ show b))
+                      else setResult (failShim Nothing ("Should have held: " ++ show a ++ " == " ++ show b))
 
 -- | Asserts that two values are not equal.
 shouldNotEqual :: (Show a, Eq a)
@@ -406,65 +408,65 @@ shouldNotEqual :: (Show a, Eq a)
                -> a
                -> FnHspecM ctxt ()
 shouldNotEqual a b = if a == b
-                         then setResult (Fail Nothing ("Should not have held: " ++ show a ++ " == " ++ show b))
+                         then setResult (failShim Nothing ("Should not have held: " ++ show a ++ " == " ++ show b))
                          else setResult Success
 
 -- | Asserts that the value is True.
 shouldBeTrue :: Bool
              -> FnHspecM ctxt ()
 shouldBeTrue True = setResult Success
-shouldBeTrue False = setResult (Fail Nothing "Value should have been True.")
+shouldBeTrue False = setResult (failShim Nothing "Value should have been True.")
 
 -- | Asserts that the value is not True (otherwise known as False).
 shouldNotBeTrue :: Bool
                  -> FnHspecM ctxt ()
 shouldNotBeTrue False = setResult Success
-shouldNotBeTrue True = setResult (Fail Nothing "Value should have been True.")
+shouldNotBeTrue True = setResult (failShim Nothing "Value should have been True.")
 
 -- | Asserts that the response is a success (either Html, or Other with status 200).
 should200 :: TestResponse -> FnHspecM ctxt ()
 should200 (Html _ _)   = setResult Success
 should200 (Json 200 _) = setResult Success
 should200 (Other 200)  = setResult Success
-should200 r = setResult (Fail Nothing (show r))
+should200 r = setResult (failShim Nothing (show r))
 
 -- | Asserts that the response is not a normal 200.
 shouldNot200 :: TestResponse -> FnHspecM ctxt ()
-shouldNot200 (Html _ _) = setResult (Fail Nothing "Got Html back.")
-shouldNot200 (Other 200) = setResult (Fail Nothing "Got Other with 200 back.")
+shouldNot200 (Html _ _) = setResult (failShim Nothing "Got Html back.")
+shouldNot200 (Other 200) = setResult (failShim Nothing "Got Other with 200 back.")
 shouldNot200 _ = setResult Success
 
 -- | Asserts that the response is a NotFound.
 should404 :: TestResponse -> FnHspecM ctxt ()
 should404 NotFound = setResult Success
-should404 r = setResult (Fail Nothing (show r))
+should404 r = setResult (failShim Nothing (show r))
 
 -- | Asserts that the response is not a NotFound.
 shouldNot404 :: TestResponse -> FnHspecM ctxt ()
-shouldNot404 NotFound = setResult (Fail Nothing "Got NotFound back.")
+shouldNot404 NotFound = setResult (failShim Nothing "Got NotFound back.")
 shouldNot404 _ = setResult Success
 
 -- | Asserts that the response is a redirect.
 should300 :: TestResponse -> FnHspecM ctxt ()
 should300 (Redirect _ _) = setResult Success
-should300 r = setResult (Fail Nothing (show r))
+should300 r = setResult (failShim Nothing (show r))
 
 -- | Asserts that the response is not a redirect.
 shouldNot300 :: TestResponse -> FnHspecM ctxt ()
-shouldNot300 (Redirect _ _) = setResult (Fail Nothing "Got Redirect back.")
+shouldNot300 (Redirect _ _) = setResult (failShim Nothing "Got Redirect back.")
 shouldNot300 _ = setResult Success
 
 -- | Asserts that the response is a redirect, and thet the url it
 -- redirects to starts with the given path.
 should300To :: Text -> TestResponse -> FnHspecM ctxt ()
 should300To pth (Redirect _ to) | pth `T.isPrefixOf` to = setResult Success
-should300To _ r = setResult (Fail Nothing (show r))
+should300To _ r = setResult (failShim Nothing (show r))
 
 -- | Asserts that the response is not a redirect to a given path. Note
 -- that it can still be a redirect for this assertion to succeed, the
 -- path it redirects to just can't start with the given path.
 shouldNot300To :: Text -> TestResponse -> FnHspecM ctxt ()
-shouldNot300To pth (Redirect _ to) | pth `T.isPrefixOf` to = setResult (Fail Nothing "Got Redirect back.")
+shouldNot300To pth (Redirect _ to) | pth `T.isPrefixOf` to = setResult (failShim Nothing "Got Redirect back.")
 shouldNot300To _ _ = setResult Success
 
 -- | Assert that a response (which should be Html) has a given selector.
@@ -472,15 +474,15 @@ shouldHaveSelector :: Text -> TestResponse -> FnHspecM ctxt ()
 shouldHaveSelector selector r@(Html _ body) =
   setResult $ if haveSelector' selector r
                 then Success
-                else Fail Nothing msg
+                else failShim Nothing msg
   where msg = T.unpack $ T.concat ["Html should have contained selector: ", selector, "\n\n", body]
-shouldHaveSelector match _ = setResult (Fail Nothing (T.unpack $ T.concat ["Non-HTML body should have contained css selector: ", match]))
+shouldHaveSelector match _ = setResult (failShim Nothing (T.unpack $ T.concat ["Non-HTML body should have contained css selector: ", match]))
 
 -- | Assert that a response (which should be Html) doesn't have a given selector.
 shouldNotHaveSelector :: Text -> TestResponse -> FnHspecM ctxt ()
 shouldNotHaveSelector selector r@(Html _ body) =
   setResult $ if haveSelector' selector r
-                then Fail Nothing msg
+                then failShim Nothing msg
                 else Success
   where msg = T.unpack $ T.concat ["Html should not have contained selector: ", selector, "\n\n", body]
 shouldNotHaveSelector _ _ = setResult Success
@@ -497,14 +499,14 @@ shouldHaveText :: Text -> TestResponse -> FnHspecM ctxt ()
 shouldHaveText match (Html _ body) =
   if T.isInfixOf match body
   then setResult Success
-  else setResult (Fail Nothing $ T.unpack $ T.concat [body, "' does not contain '", match, "'."])
-shouldHaveText match resp = setResult (Fail Nothing (T.unpack $ T.concat [T.pack (show resp), " does not contain: ", match]))
+  else setResult (failShim Nothing $ T.unpack $ T.concat [body, "' does not contain '", match, "'."])
+shouldHaveText match resp = setResult (failShim Nothing (T.unpack $ T.concat [T.pack (show resp), " does not contain: ", match]))
 
 -- | Asserts that the response (which should be Html) does not contain the given text.
 shouldNotHaveText :: Text -> TestResponse -> FnHspecM ctxt ()
 shouldNotHaveText match (Html _ body) =
   if T.isInfixOf match body
-  then setResult (Fail Nothing $ T.unpack $ T.concat [body, "' contains '", match, "'."])
+  then setResult (failShim Nothing $ T.unpack $ T.concat [body, "' contains '", match, "'."])
   else setResult Success
 shouldNotHaveText _ _ = setResult Success
 
@@ -560,14 +562,14 @@ withRequest rq' t = do (FnHspecState r app mids ctxt bef aft) <- S.get
 --   do contents <- sessContents
 --      if t `T.isInfixOf` contents
 --        then setResult Success
---        else setResult (Fail Nothing $ "Session did not contain: " ++ T.unpack t
+--        else setResult (failShim Nothing $ "Session did not contain: " ++ T.unpack t
 --                                     ++ "\n\nSession was:\n" ++ T.unpack contents)
 
 -- sessionShouldNotContain :: Text -> SnapHspecM b ()
 -- sessionShouldNotContain t =
 --   do contents <- sessContents
 --      if t `T.isInfixOf` contents
---        then setResult (Fail Nothing $ "Session should not have contained: " ++ T.unpack t
+--        then setResult (failShim Nothing $ "Session should not have contained: " ++ T.unpack t
 --                                     ++ "\n\nSession was:\n" ++ T.unpack contents)
 --        else setResult Success
 
@@ -590,12 +592,12 @@ form expected theForm theParams =
        Value a -> shouldEqual (snd r) (Just a)
        Predicate f ->
          case snd r of
-           Nothing -> setResult (Fail Nothing $ T.unpack $
+           Nothing -> setResult (failShim Nothing $ T.unpack $
                                  T.append "Expected form to validate. Resulted in errors: "
                                           (T.pack (show $ DF.viewErrors $ fst r)))
            Just v -> if f v
                        then setResult Success
-                       else setResult (Fail Nothing $ T.unpack $
+                       else setResult (failShim Nothing $ T.unpack $
                                        T.append "Expected predicate to pass on value: "
                                                 (T.pack (show v)))
        ErrorPaths expectedPaths ->
@@ -603,11 +605,11 @@ form expected theForm theParams =
             if all (`elem` viewErrorPaths) expectedPaths
                then if length viewErrorPaths == length expectedPaths
                        then setResult Success
-                       else setResult (Fail Nothing $ "Number of errors did not match test. Got:\n\n "
+                       else setResult (failShim Nothing $ "Number of errors did not match test. Got:\n\n "
                                             ++ show viewErrorPaths
                                             ++ "\n\nBut expected:\n\n"
                                             ++ show expectedPaths)
-               else setResult (Fail Nothing $ "Did not have all errors specified. Got:\n\n"
+               else setResult (failShim Nothing $ "Did not have all errors specified. Got:\n\n"
                                     ++ show viewErrorPaths
                                     ++ "\n\nBut expected:\n\n"
                                     ++ show expectedPaths)
