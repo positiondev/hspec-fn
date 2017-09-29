@@ -263,12 +263,24 @@ post path ps = do
    req <- liftIO $ post' path ps
    runRequest req
 
-{-
--- | Creates a new POST request with a given JSON value as the request body.
-postJson :: ToJSON tj => Text -> tj -> FnHspecM ctxt TestResponse
-postJson path json = runRequest $ postRaw (T.encodeUtf8 path)
-                                               "application/json"
-                                               (toStrict $ encode json) -}
+-- | Creates a new POST request, with a JSON body.
+postJson :: (RequestContext ctxt, ToJSON tj) => Text -> tj -> FnHspecM ctxt TestResponse
+postJson path blob = do
+   req <- liftIO $ postJson' path blob
+   runRequest req
+
+postJson' :: ToJSON tj => Text -> tj -> IO Request
+postJson' path blob = do
+  let bod = encode blob
+  refChunks <- newIORef $ LBS.toChunks bod
+  let req = setPath defaultRequest { requestBody = atomicModifyIORef refChunks $ \bss ->
+                                       case bss of
+                                         [] -> ([], B.empty)
+                                         x:y -> (y, x)
+                                   , requestMethod = methodPost
+                                   , requestHeaders = [(hContentType, "application/json")] }
+                   (T.encodeUtf8 path)
+  return req
 
 post' :: Text -> SimpleQuery -> IO Request
 post' path ps = do
