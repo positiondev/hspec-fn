@@ -1,5 +1,5 @@
 name:                hspec-fn
-version:             0.1.0.0
+version:             0.1.1.0
 synopsis:            A library for testing with Hspec and the Snap Web Framework
 homepage:            https://github.com/dbp/hspec-snap
 license:             ISC
@@ -18,17 +18,17 @@ library
   exposed-modules:
         Test.Hspec.Fn
   hs-source-dirs:  src
-  build-depends:   base                     >= 4.6     
-                 , aeson                    >= 0.6    
-                 , bytestring               >= 0.9    
-                 , containers               >= 0.4    
+  build-depends:   base                     >= 4.6
+                 , aeson                    >= 0.6
+                 , bytestring               >= 0.9
+                 , containers               >= 0.4
                  , digestive-functors       >= 0.7
                  , directory
-                 , hspec                    >= 2.4     
-                 , hspec-core               >= 2.4   
-                 , hxt                      >= 9.3 
-                 , HandsomeSoup             >= 0.3 
-                 , lens                     >= 3.10 
+                 , hspec                    >= 2.4
+                 , hspec-core               >= 2.4
+                 , hxt                      >= 9.3
+                 , HandsomeSoup             >= 0.3
+                 , lens                     >= 3.10
                  , mtl                      >= 2
                  , text                     >= 0.11
                  , transformers             >= 0.3
@@ -43,17 +43,17 @@ Test-Suite test-hspec-fn
   hs-source-dirs:  spec
   main-is:         Main.hs
   other-modules:   Utils
-  build-depends:   base                     >= 4.6     
-                 , aeson                    >= 0.6    
-                 , bytestring               >= 0.9    
-                 , containers               >= 0.4    
+  build-depends:   base                     >= 4.6
+                 , aeson                    >= 0.6
+                 , bytestring               >= 0.9
+                 , containers               >= 0.4
                  , digestive-functors       >= 0.7
-                 , directory  
-                 , hspec                    >= 2.4     
-                 , hspec-core               >= 2.4     
-                 , hxt                      >= 9.3 
-                 , HandsomeSoup             >= 0.3 
-                 , lens                     >= 3.10 
+                 , directory
+                 , hspec                    >= 2.4
+                 , hspec-core               >= 2.4
+                 , hxt                      >= 9.3
+                 , HandsomeSoup             >= 0.3
+                 , lens                     >= 3.10
                  , mtl                      >= 2
                  , text                     >= 0.11
                  , transformers             >= 0.3
