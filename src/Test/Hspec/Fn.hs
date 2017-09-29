@@ -31,6 +31,8 @@ module Test.Hspec.Fn (
   , get'
   , post
   , post'
+  , postJson
+  , postJson'
 
   -- * Helpers for dealing with TestResponses
   , restrictResponse
@@ -112,7 +114,8 @@ import           Network.Wai                  (Application, Middleware,
 import           Network.Wai.Internal         (ResponseReceived (..))
 import           Network.Wai.Test             (setPath)
 import           Test.Hspec
-import           Test.Hspec.Core.Spec (FailureReason(..), Result(..), Example(..), Location)
+import           Test.Hspec.Core.Spec         (Example (..), FailureReason (..),
+                                               Location, Result (..))
 import qualified Text.Digestive               as DF
 import qualified Text.HandsomeSoup            as HS
 import qualified Text.XML.HXT.Core            as HXT
