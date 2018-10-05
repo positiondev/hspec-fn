@@ -3,11 +3,10 @@ packages:
 - '.'
 - location:
     git: https://github.com/positiondev/fn
-    commit: 6989eca99cc02da5e2268e1aa79157bdd6220ab5
+    commit: 308cda9640db7a78cfc7a89e69e6d9e3e138b24c
   extra-dep: true
   subdirs:
     - fn
 extra-deps:
-  - digestive-functors-0.8.2.0
-  - directory-1.3.0.0
-resolver: lts-8.15
+- digestive-functors-0.8.4.0
+resolver: lts-12.11
