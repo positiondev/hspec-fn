@@ -42,7 +42,6 @@ Test-Suite test-hspec-fn
   type:            exitcode-stdio-1.0
   hs-source-dirs:  spec
   main-is:         Main.hs
-  other-modules:   Utils
   build-depends:   base                     >= 4.6
                  , aeson                    >= 0.6
                  , bytestring               >= 0.9
@@ -62,4 +61,4 @@ Test-Suite test-hspec-fn
                  , http-types
                  , fn
                  , blaze-builder
-  build-depends:   hspec-fn               == 0.1.1.0
+                 , hspec-fn

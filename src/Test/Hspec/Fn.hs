@@ -115,17 +115,21 @@ import           Network.Wai.Internal         (ResponseReceived (..))
 import           Network.Wai.Test             (setPath)
 import           Test.Hspec
 import           Test.Hspec.Core.Spec         (Example (..), FailureReason (..),
-                                               Location, Result (..))
+                                               Location, Result (..), ResultStatus(..))
 import qualified Text.Digestive               as DF
 import qualified Text.HandsomeSoup            as HS
 import qualified Text.XML.HXT.Core            as HXT
 import           Web.Fn                       (RequestContext, defaultFnRequest,
                                                getRequest, okText, setRequest)
 
-failShim :: Maybe Location -> String -> Result
+failShim :: Maybe Location -> String -> ResultStatus
 failShim mLocation reason = Failure mLocation (Reason reason)
 -- derives Num and Ord to avoid excessive newtype wrapping and unwrapping
 -- in pattern matching, etc.
+
+resultShim :: ResultStatus -> Result
+resultShim resultStatus = Result "" resultStatus
+
 newtype RespCode = RespCode Int deriving (Show, Read, Eq, Num, Ord)
 
 -- | The result of making requests against your application. Most
@@ -156,7 +160,7 @@ type FnHspecM b = StateT (FnHspecState b) IO
 -- > Session state
 -- > Before handler (runs before each eval)
 -- > After handler (runs after each eval).
-data FnHspecState ctxt = FnHspecState Result
+data FnHspecState ctxt = FnHspecState ResultStatus
                                       Application
                                       [Middleware]
                                       ctxt
@@ -168,10 +172,8 @@ instance Example (FnHspecM b ()) where
   evaluateExample s _ cb _ =
     do mv <- newEmptyMVar
        cb $ \st -> do
-         r <- catch
-              (do ((),FnHspecState r' _ _ _ _ _) <- runStateT s st
-                  return r')
-              return
+         r <- do ((),FnHspecState r' _ _ _ _ _) <- runStateT s st
+                 return (Result "" r')
          putMVar mv r
        takeMVar mv
 
@@ -390,7 +392,7 @@ eval act = do (FnHspecState _ site _ ctxt bef aft) <- S.get
 
 -- | Records a test Success or Fail. Only the first Fail will be
 -- recorded (and will cause the whole block to Fail).
-setResult :: Result -> FnHspecM ctxt ()
+setResult :: ResultStatus -> FnHspecM ctxt ()
 setResult r = do (FnHspecState r' s ms i bef aft) <- S.get
                  case r of
                    Success -> S.put (FnHspecState r s ms i bef aft)
