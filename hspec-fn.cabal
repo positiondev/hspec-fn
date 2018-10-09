@@ -61,4 +61,4 @@ Test-Suite test-hspec-fn
                  , http-types
                  , fn
                  , blaze-builder
-  build-depends:   hspec-fn               == 0.1.1.0
+                 , hspec-fn
